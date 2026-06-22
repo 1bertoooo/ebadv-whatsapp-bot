@@ -27,6 +27,10 @@ const LIS_SECRET = process.env.LIS_CAPTURE_SECRET;
 const WA_GROUP_NAME = process.env.WA_GROUP_NAME || 'EBADV. Captura';
 const AUTH_DIR = process.env.WA_AUTH_DIR || './auth_state';
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+// Se WA_PHONE_NUMBER estiver setado (formato internacional sem +, ex: 5543988742822),
+// o bot vai usar pareamento por código de 8 dígitos em vez de QR.
+// Útil quando o WhatsApp bloqueia pareamento por QR (acontece com chip recém-ativado).
+const WA_PHONE_NUMBER = process.env.WA_PHONE_NUMBER?.replace(/\D/g, '') || '';
 
 if (!LIS_URL || !LIS_SECRET) {
   console.error('Faltam LIS_CAPTURE_URL ou LIS_CAPTURE_SECRET no .env');
@@ -56,10 +60,33 @@ async function start() {
 
   sock.ev.on('creds.update', saveCreds);
 
+  // Pareamento por código (em vez de QR) quando WA_PHONE_NUMBER está setado
+  if (WA_PHONE_NUMBER && !sock.authState.creds.registered) {
+    setTimeout(async () => {
+      try {
+        const code = await sock.requestPairingCode(WA_PHONE_NUMBER);
+        const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
+        console.log('\n========================================');
+        console.log('CÓDIGO DE PAREAMENTO (8 dígitos):');
+        console.log('');
+        console.log('         ' + formatted);
+        console.log('');
+        console.log('No celular do bot:');
+        console.log('  WhatsApp > Dispositivos conectados');
+        console.log('  > Conectar dispositivo');
+        console.log('  > Conectar com número de telefone');
+        console.log('  > digite o número, depois o código acima');
+        console.log('========================================\n');
+      } catch (err) {
+        logger.error({ err: err?.message }, 'falha ao gerar pairing code');
+      }
+    }, 3500);
+  }
+
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
+    if (qr && !WA_PHONE_NUMBER) {
       console.log('\n========================================');
       console.log('LEIA O QR CODE ABAIXO COM O CELULAR DO BOT');
       console.log('WhatsApp > Dispositivos conectados > Conectar dispositivo');
