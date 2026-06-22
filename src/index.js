@@ -226,9 +226,24 @@ async function handleMessage(sock, msg) {
     return;
   }
 
-  const { reply_text, classification } = res.data || {};
-  logger.info({ classification, has_reply: !!reply_text }, 'LIS respondeu');
+  const { reply_text, reaction_emoji, classification } = res.data || {};
+  logger.info(
+    { classification, has_reaction: !!reaction_emoji, has_reply: !!reply_text },
+    'LIS respondeu',
+  );
 
+  // Reage com emoji na mensagem original (☑️ pra captura, 📸 pra imagem etc)
+  if (reaction_emoji) {
+    try {
+      await sock.sendMessage(targetGroupJid, {
+        react: { text: reaction_emoji, key: msg.key },
+      });
+    } catch (err) {
+      logger.error({ err: err?.message }, 'falha ao reagir');
+    }
+  }
+
+  // Texto só quando houver algo a esclarecer (erro, pedido de input)
   if (reply_text) {
     await sock.sendMessage(targetGroupJid, { text: reply_text }, { quoted: msg });
   }
