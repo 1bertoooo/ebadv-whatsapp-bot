@@ -1,0 +1,20 @@
+{
+  "name": "ebadv-whatsapp-bot",
+  "version": "0.1.0",
+  "description": "Bot Baileys que escuta o grupo EBADV.Captura e empurra mensagens pro LIS",
+  "main": "src/index.js",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.18",
+    "@hapi/boom": "^10.0.1",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "pino": "^9.5.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
