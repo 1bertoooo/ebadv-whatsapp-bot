@@ -24,7 +24,12 @@ import path from 'node:path';
 
 const LIS_URL = process.env.LIS_CAPTURE_URL;
 const LIS_SECRET = process.env.LIS_CAPTURE_SECRET;
-const WA_GROUP_NAME = process.env.WA_GROUP_NAME || 'EBADV. Captura';
+// Lista de grupos separados por ; (ex: "EBADV. Captura;EBadv. Agogê")
+// Fallback: WA_GROUP_NAME (compat retroativa, único grupo).
+const WA_GROUP_NAMES = (process.env.WA_GROUP_NAMES || process.env.WA_GROUP_NAME || 'EBADV. Captura')
+  .split(';')
+  .map(s => s.trim())
+  .filter(Boolean);
 const AUTH_DIR = process.env.WA_AUTH_DIR || './auth_state';
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 // Se WA_PHONE_NUMBER estiver setado (formato internacional sem +, ex: 5543988742822),
@@ -39,8 +44,8 @@ if (!LIS_URL || !LIS_SECRET) {
 
 const logger = pino({ level: LOG_LEVEL });
 
-// Cache: nome do grupo -> jid (descoberto na primeira mensagem dele)
-let targetGroupJid = null;
+// Cache de grupos alvo: jid -> nome (descoberto após conectar)
+const targetGroups = new Map(); // Map<string jid, string name>
 
 async function start() {
   if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
@@ -96,16 +101,20 @@ async function start() {
 
     if (connection === 'open') {
       logger.info('conectado ao WhatsApp');
-      // tenta achar o grupo configurado
+      // Tenta achar todos os grupos configurados
       sock.groupFetchAllParticipating().then((groups) => {
+        targetGroups.clear();
         for (const [jid, g] of Object.entries(groups)) {
-          if (g.subject === WA_GROUP_NAME) {
-            targetGroupJid = jid;
+          if (WA_GROUP_NAMES.includes(g.subject)) {
+            targetGroups.set(jid, g.subject);
             logger.info({ jid, name: g.subject }, 'grupo alvo localizado');
           }
         }
-        if (!targetGroupJid) {
-          logger.warn({ procurado: WA_GROUP_NAME }, 'grupo não encontrado — bot precisa estar no grupo');
+        const naoEncontrados = WA_GROUP_NAMES.filter(
+          n => !Array.from(targetGroups.values()).includes(n),
+        );
+        if (naoEncontrados.length > 0) {
+          logger.warn({ naoEncontrados }, 'grupos não encontrados — bot precisa estar neles');
         }
       });
     }
@@ -139,8 +148,10 @@ async function handleMessage(sock, msg) {
   if (msg.key.fromMe) return;
   // Ignora msg sem conteúdo
   if (!msg.message) return;
-  // Só escuta o grupo alvo
-  if (!targetGroupJid || msg.key.remoteJid !== targetGroupJid) return;
+  // Só escuta grupos alvo
+  const groupJid = msg.key.remoteJid;
+  const groupName = targetGroups.get(groupJid);
+  if (!groupName) return;
 
   // Identifica tipo
   const m = msg.message;
@@ -192,7 +203,8 @@ async function handleMessage(sock, msg) {
 
   const payload = {
     wa_message_id: msg.key.id,
-    wa_group_jid: msg.key.remoteJid,
+    wa_group_jid: groupJid,
+    wa_group_name: groupName, // <-- modo no LIS: "EBADV. Captura" ou "EBadv. Agogê"
     wa_sender_jid: msg.key.participant || msg.participant || msg.key.remoteJid,
     wa_sender_name: msg.pushName || null,
     wa_timestamp: Number(msg.messageTimestamp),
@@ -235,7 +247,7 @@ async function handleMessage(sock, msg) {
   // Reage com emoji na mensagem original (☑️ pra captura, 📸 pra imagem etc)
   if (reaction_emoji) {
     try {
-      await sock.sendMessage(targetGroupJid, {
+      await sock.sendMessage(groupJid, {
         react: { text: reaction_emoji, key: msg.key },
       });
     } catch (err) {
@@ -247,7 +259,7 @@ async function handleMessage(sock, msg) {
   if (reply_text) {
     let sent;
     try {
-      sent = await sock.sendMessage(targetGroupJid, { text: reply_text }, { quoted: msg });
+      sent = await sock.sendMessage(groupJid, { text: reply_text }, { quoted: msg });
     } catch (err) {
       logger.error({ err: err?.message }, 'falha ao enviar reply');
     }
