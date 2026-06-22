@@ -226,7 +226,7 @@ async function handleMessage(sock, msg) {
     return;
   }
 
-  const { reply_text, reaction_emoji, classification } = res.data || {};
+  const { reply_text, reaction_emoji, classification, capture_id } = res.data || {};
   logger.info(
     { classification, has_reaction: !!reaction_emoji, has_reply: !!reply_text },
     'LIS respondeu',
@@ -243,9 +243,27 @@ async function handleMessage(sock, msg) {
     }
   }
 
-  // Texto só quando houver algo a esclarecer (erro, pedido de input)
+  // Texto só quando houver algo a esclarecer (erro, pedido de input, confirmação de arquivo)
   if (reply_text) {
-    await sock.sendMessage(targetGroupJid, { text: reply_text }, { quoted: msg });
+    let sent;
+    try {
+      sent = await sock.sendMessage(targetGroupJid, { text: reply_text }, { quoted: msg });
+    } catch (err) {
+      logger.error({ err: err?.message }, 'falha ao enviar reply');
+    }
+
+    // Reporta wa_message_id da própria resposta pro LIS — habilita correção via reply
+    if (sent?.key?.id && capture_id) {
+      try {
+        await axios.patch(
+          LIS_URL,
+          { capture_id, bot_reply_wa_id: sent.key.id },
+          { headers: { Authorization: `Bearer ${LIS_SECRET}` }, timeout: 10000 },
+        );
+      } catch (err) {
+        logger.warn({ err: err?.message }, 'falha reportando bot_reply_wa_id');
+      }
+    }
   }
 }
 
