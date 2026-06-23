@@ -47,6 +47,23 @@ const logger = pino({ level: LOG_LEVEL });
 // Cache de grupos alvo: jid -> nome (descoberto após conectar)
 const targetGroups = new Map(); // Map<string jid, string name>
 
+// Stats locais pro heartbeat
+const stats = {
+  uptimeIniciadoEm: new Date().toISOString(),
+  ultimaMsgRecebidaAt: null,
+  ultimaMsgEnviadaAt: null,
+  msgsHoje: 0,
+  hojeStr: new Date().toISOString().slice(0, 10),
+  conexao: 'connecting',
+};
+function statsResetSeNovoDia() {
+  const agora = new Date().toISOString().slice(0, 10);
+  if (agora !== stats.hojeStr) {
+    stats.hojeStr = agora;
+    stats.msgsHoje = 0;
+  }
+}
+
 async function start() {
   if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
@@ -101,6 +118,7 @@ async function start() {
 
     if (connection === 'open') {
       logger.info('conectado ao WhatsApp');
+      stats.conexao = 'open';
       // Tenta achar todos os grupos configurados
       sock.groupFetchAllParticipating().then((groups) => {
         targetGroups.clear();
@@ -116,17 +134,64 @@ async function start() {
         if (naoEncontrados.length > 0) {
           logger.warn({ naoEncontrados }, 'grupos não encontrados — bot precisa estar neles');
         }
+        // Anuncia ao LIS que está pareado
+        notificarLIS('event', {
+          type: 'bot_paired',
+          wa_group_jid: '',
+          jids_grupos: Object.fromEntries(targetGroups),
+        }).catch(() => {});
       });
+    } else if (connection === 'connecting') {
+      stats.conexao = 'connecting';
     }
 
     if (connection === 'close') {
+      stats.conexao = 'closed';
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
       const shouldReconnect = code !== DisconnectReason.loggedOut;
       logger.warn({ code, shouldReconnect }, 'conexão fechou');
       if (shouldReconnect) setTimeout(start, 3000);
       else {
+        stats.conexao = 'logged_out';
         logger.error('logged out — apague auth_state e leia QR de novo');
         process.exit(1);
+      }
+    }
+  });
+
+  // Novo membro / saída de membro
+  sock.ev.on('group-participants.update', async (ev) => {
+    if (!targetGroups.has(ev.id)) return;
+    if (ev.action === 'add') {
+      // Filtra: não cumprimenta o próprio bot
+      const myJid = sock.user?.id?.split(':')[0] + '@s.whatsapp.net';
+      const novos = (ev.participants || [])
+        .filter(jid => jid !== myJid)
+        .map(jid => ({ jid, name: '' }));
+      if (novos.length === 0) return;
+
+      try {
+        const r = await notificarLIS('event', {
+          type: 'member_joined',
+          wa_group_jid: ev.id,
+          wa_group_name: targetGroups.get(ev.id),
+          new_members: novos,
+          added_by_jid: ev.author || null,
+        });
+        // LIS devolve mensagens a enviar
+        for (const m of r?.mensagens || []) {
+          try {
+            await sock.sendMessage(ev.id, {
+              text: m.text,
+              mentions: [m.jid],
+            });
+            stats.ultimaMsgEnviadaAt = new Date().toISOString();
+          } catch (err) {
+            logger.error({ err: err?.message }, 'falha ao cumprimentar membro');
+          }
+        }
+      } catch (err) {
+        logger.error({ err: err?.message }, 'falha notificar LIS de member_joined');
       }
     }
   });
@@ -136,11 +201,52 @@ async function start() {
     for (const msg of messages) {
       try {
         await handleMessage(sock, msg);
+        statsResetSeNovoDia();
+        stats.ultimaMsgRecebidaAt = new Date().toISOString();
+        stats.msgsHoje++;
       } catch (err) {
         logger.error({ err: err?.message, stack: err?.stack }, 'falha processando msg');
       }
     }
   });
+
+  // Heartbeat a cada 60s pro LIS saber que tá vivo
+  iniciarHeartbeat();
+}
+
+const LIS_BASE = (LIS_URL || '').replace(/\/api\/whatsapp\/.*$/, '');
+
+async function notificarLIS(endpoint, payload) {
+  const url = `${LIS_BASE}/api/whatsapp/${endpoint}`;
+  try {
+    const r = await axios.post(url, payload, {
+      headers: { Authorization: `Bearer ${LIS_SECRET}` },
+      timeout: 15000,
+    });
+    return r.data;
+  } catch (err) {
+    logger.warn({ endpoint, err: err?.message }, 'notificarLIS falhou');
+    return null;
+  }
+}
+
+function iniciarHeartbeat() {
+  const enviar = async () => {
+    try {
+      await notificarLIS('heartbeat', {
+        conexao: stats.conexao,
+        baileys_version: 'baileys',
+        uptime_iniciado_em: stats.uptimeIniciadoEm,
+        ultima_msg_recebida_at: stats.ultimaMsgRecebidaAt,
+        ultima_msg_enviada_at: stats.ultimaMsgEnviadaAt,
+        msgs_processadas_hoje: stats.msgsHoje,
+        jids_grupos: Object.fromEntries(targetGroups),
+      });
+    } catch {}
+  };
+  // primeiro envio imediato + cada 60s
+  setTimeout(enviar, 5000);
+  setInterval(enviar, 60_000);
 }
 
 async function handleMessage(sock, msg) {
@@ -260,6 +366,7 @@ async function handleMessage(sock, msg) {
     let sent;
     try {
       sent = await sock.sendMessage(groupJid, { text: reply_text }, { quoted: msg });
+      stats.ultimaMsgEnviadaAt = new Date().toISOString();
     } catch (err) {
       logger.error({ err: err?.message }, 'falha ao enviar reply');
     }
