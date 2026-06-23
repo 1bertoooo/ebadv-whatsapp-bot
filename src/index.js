@@ -212,6 +212,39 @@ async function start() {
 
   // Heartbeat a cada 60s pro LIS saber que tá vivo
   iniciarHeartbeat();
+
+  // Pollster da fila de mensagens outbound (sprint, etc) a cada 30s
+  iniciarOutboundPoller(sock);
+}
+
+function iniciarOutboundPoller(sock) {
+  const verificar = async () => {
+    try {
+      const r = await axios.get(`${LIS_BASE}/api/whatsapp/outbound`, {
+        headers: { Authorization: `Bearer ${LIS_SECRET}` },
+        timeout: 10000,
+      });
+      const mensagens = r.data?.mensagens || [];
+      for (const m of mensagens) {
+        try {
+          const sent = await sock.sendMessage(m.group_jid, { text: m.text });
+          stats.ultimaMsgEnviadaAt = new Date().toISOString();
+          await axios.post(
+            `${LIS_BASE}/api/whatsapp/outbound`,
+            { id: m.id, bot_msg_id: sent?.key?.id || null },
+            { headers: { Authorization: `Bearer ${LIS_SECRET}` }, timeout: 10000 },
+          );
+          logger.info({ motivo: m.motivo, group: m.group_jid }, 'mensagem outbound enviada');
+        } catch (err) {
+          logger.error({ id: m.id, err: err?.message }, 'falha enviar mensagem outbound');
+        }
+      }
+    } catch (err) {
+      // Silencioso — outbound é best-effort
+    }
+  };
+  setTimeout(verificar, 15000);
+  setInterval(verificar, 30_000);
 }
 
 const LIS_BASE = (LIS_URL || '').replace(/\/api\/whatsapp\/.*$/, '');
