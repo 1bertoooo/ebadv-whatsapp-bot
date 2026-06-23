@@ -321,6 +321,15 @@ async function handleMessage(sock, msg) {
     text = m.videoMessage.caption || '';
   } else if (m.stickerMessage) {
     type = 'sticker';
+    // Baixa o webp e enviou como data URL pra Luana descrever via Vision
+    try {
+      const f = await downloadAsFile(sock, msg, 'stickerMessage', m.stickerMessage);
+      if (f?.base64) {
+        var stickerB64 = `data:${f.mime || 'image/webp'};base64,${f.base64}`;
+      }
+    } catch (err) {
+      logger.warn({ err: err?.message }, 'falha ao baixar sticker');
+    }
   } else if (m.reactionMessage) {
     type = 'reaction';
     reaction = {
@@ -352,6 +361,7 @@ async function handleMessage(sock, msg) {
     text_content: text || undefined,
     file: file || undefined,
     reaction: reaction || undefined,
+    sticker_b64: typeof stickerB64 !== 'undefined' ? stickerB64 : undefined,
   };
 
   logger.info(
@@ -377,11 +387,23 @@ async function handleMessage(sock, msg) {
     return;
   }
 
-  const { reply_text, reaction_emoji, classification, capture_id } = res.data || {};
+  const { reply_text, reaction_emoji, classification, capture_id, sticker_url } = res.data || {};
   logger.info(
-    { classification, has_reaction: !!reaction_emoji, has_reply: !!reply_text },
+    { classification, has_reaction: !!reaction_emoji, has_reply: !!reply_text, has_sticker: !!sticker_url },
     'LIS respondeu',
   );
+
+  // Envia sticker se a Luana decidiu mandar (Agogê)
+  if (sticker_url) {
+    try {
+      const r = await axios.get(sticker_url, { responseType: 'arraybuffer', timeout: 15000 });
+      await sock.sendMessage(groupJid, { sticker: Buffer.from(r.data) });
+      stats.ultimaMsgEnviadaAt = new Date().toISOString();
+      logger.info({ sticker_url: sticker_url.split('/').pop() }, 'sticker enviado');
+    } catch (err) {
+      logger.error({ err: err?.message }, 'falha ao enviar sticker');
+    }
+  }
 
   // Reage com emoji na mensagem original (☑️ pra captura, 📸 pra imagem etc)
   if (reaction_emoji) {
