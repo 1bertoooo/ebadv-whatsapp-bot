@@ -227,14 +227,24 @@ function iniciarOutboundPoller(sock) {
       const mensagens = r.data?.mensagens || [];
       for (const m of mensagens) {
         try {
-          const sent = await sock.sendMessage(m.group_jid, { text: m.text });
+          let sent;
+          if (m.sticker_url) {
+            // Baixa o webp e envia como sticker nativo
+            const stickerRes = await axios.get(m.sticker_url, { responseType: 'arraybuffer', timeout: 15000 });
+            sent = await sock.sendMessage(m.group_jid, { sticker: Buffer.from(stickerRes.data) });
+          } else if (m.text) {
+            sent = await sock.sendMessage(m.group_jid, { text: m.text });
+          } else {
+            logger.warn({ id: m.id }, 'mensagem outbound vazia — pulando');
+            continue;
+          }
           stats.ultimaMsgEnviadaAt = new Date().toISOString();
           await axios.post(
             `${LIS_BASE}/api/whatsapp/outbound`,
             { id: m.id, bot_msg_id: sent?.key?.id || null },
             { headers: { Authorization: `Bearer ${LIS_SECRET}` }, timeout: 10000 },
           );
-          logger.info({ motivo: m.motivo, group: m.group_jid }, 'mensagem outbound enviada');
+          logger.info({ motivo: m.motivo, group: m.group_jid, kind: m.sticker_url ? 'sticker' : 'text' }, 'mensagem outbound enviada');
         } catch (err) {
           logger.error({ id: m.id, err: err?.message }, 'falha enviar mensagem outbound');
         }
