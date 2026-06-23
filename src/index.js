@@ -228,7 +228,13 @@ function iniciarOutboundPoller(sock) {
       for (const m of mensagens) {
         try {
           let sent;
-          if (m.sticker_url) {
+          if (m.action === 'delete' && m.target_msg_id) {
+            // Apaga pra todos via Baileys revoke
+            sent = await sock.sendMessage(m.group_jid, {
+              delete: { remoteJid: m.group_jid, fromMe: true, id: m.target_msg_id, participant: undefined },
+            });
+            logger.info({ motivo: m.motivo, target: m.target_msg_id }, 'mensagem apagada');
+          } else if (m.sticker_url) {
             // Baixa o webp e envia como sticker nativo
             const stickerRes = await axios.get(m.sticker_url, { responseType: 'arraybuffer', timeout: 15000 });
             sent = await sock.sendMessage(m.group_jid, { sticker: Buffer.from(stickerRes.data) });
