@@ -370,6 +370,15 @@ async function handleMessage(sock, msg) {
     wa_group_jid: groupJid,
     wa_group_name: groupName, // <-- modo no LIS: "EBADV. Captura" ou "EBadv. Agogê"
     wa_sender_jid: msg.key.participant || msg.participant || msg.key.remoteJid,
+    // Baileys adicionou senderPn/participantPn pra expor o telefone real
+    // mesmo quando o JID público é @lid (anônimo do WhatsApp Business).
+    // Tentamos várias fontes — o LIS usa pra mapear no app_user via whatsapp_phone.
+    wa_sender_phone:
+      msg.key.senderPn ||
+      msg.key.participantPn ||
+      msg.key.participantAlt ||
+      (ctxInfo && (ctxInfo.participantPn || ctxInfo.participantAlt)) ||
+      null,
     wa_sender_name: msg.pushName || null,
     wa_timestamp: Number(msg.messageTimestamp),
     wa_quoted_message_id: quotedId,
