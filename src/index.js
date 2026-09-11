@@ -167,7 +167,27 @@ async function start() {
       if (shouldReconnect) setTimeout(start, 3000);
       else {
         stats.conexao = 'logged_out';
-        logger.error('logged out — apague auth_state e leia QR de novo');
+        logger.error('logged out - apague auth_state e leia QR de novo');
+        // Avisa o LIS na hora. Sem isto o bot morre calado e so se
+        // descobre horas depois, pelas capturas que nao chegaram.
+        // (Estava so no VPS desde 08/2026; trazido para o repo em 11/09.)
+        try {
+          const base = (process.env.LIS_CAPTURE_URL || '').replace(/\/capture$/, '');
+          if (base) {
+            fetch(base + '/bot-down', {
+              method: 'POST',
+              headers: {
+                'Authorization': 'Bearer ' + (process.env.LIS_CAPTURE_SECRET || ''),
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                motivo: 'logged_out',
+                codigo: code,
+                uptime_iniciado_em: stats.uptimeIniciadoEm,
+              }),
+            }).catch(e => logger.warn({ err: e && e.message }, 'bot-down alert falhou'));
+          }
+        } catch (e) { logger.warn({ err: e.message }, 'bot-down erro'); }
         process.exit(1);
       }
     }
