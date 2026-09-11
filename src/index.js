@@ -359,6 +359,19 @@ async function executarPedido(sock, p) {
     return { jid, nome: meta.subject, participantes };
   }
 
+  if (p.tipo === 'criar_grupo') {
+    // Para o escritorio que ainda nao tem grupo: a gente cria, devolve
+    // o link e ele convida a equipe. O nosso numero nasce administrador,
+    // entao depois consegue sair sozinho se o teste nao virar contrato.
+    const nome = p.payload?.nome || 'Escritorio';
+    const g = await sock.groupCreate(nome, []);
+    const codigo = await sock.groupInviteCode(g.id);
+    grupoOrg.set(g.id, p.org_id);
+    targetGroups.set(g.id, nome);
+    logger.info({ jid: g.id, nome }, 'grupo criado para cliente');
+    return { jid: g.id, nome, convite: 'https://chat.whatsapp.com/' + codigo, participantes: [] };
+  }
+
   if (p.tipo === 'sair_grupo') {
     const jid = p.payload?.jid;
     if (!jid) throw new Error('pedido sem jid');
