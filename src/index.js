@@ -339,14 +339,29 @@ async function executarPedido(sock, p) {
     }
 
     const meta = await sock.groupMetadata(jid);
-    const eu = (sock.user?.id || '').split(':')[0] + '@s.whatsapp.net';
+
+    // Tirar o proprio bot da lista e mais chato do que parece: o WhatsApp
+    // pode listar o mesmo aparelho pelo numero (@s.whatsapp.net) ou pelo
+    // identificador anonimo (@lid), e os dois nao se parecem em nada. Sem
+    // comparar os dois, a tela de cadastro mostra a Luana como se fosse
+    // uma pessoa do escritorio. (visto em 11/09/2026)
+    const meusIds = new Set(
+      [sock.user?.id, sock.user?.lid]
+        .filter(Boolean)
+        .map(x => x.split(':')[0].split('@')[0]),
+    );
     const participantes = (meta.participants || [])
-      .filter(x => x.id !== eu)
-      .map(x => ({
-        jid: x.id,
-        fim: (x.id.split('@')[0] || '').slice(-4),
-        admin: x.admin === 'admin' || x.admin === 'superadmin',
-      }));
+      .filter(x => !meusIds.has((x.id || '').split('@')[0]) && !meusIds.has((x.jid || '').split('@')[0]))
+      .map(x => {
+        // preferimos o numero de verdade: e por ele que a Luana reconhece
+        // quem escreveu, e o @lid nao serve para isso.
+        const fone = (x.phoneNumber || x.jid || x.id || '').split('@')[0];
+        return {
+          jid: fone,
+          fim: fone.slice(-4),
+          admin: x.admin === 'admin' || x.admin === 'superadmin',
+        };
+      });
 
     grupoOrg.set(jid, p.org_id);
     targetGroups.set(jid, meta.subject);
