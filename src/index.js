@@ -277,12 +277,22 @@ async function iniciarRoteamento(sock) {
         { headers: { Authorization: `Bearer ${LIS_SECRET}` }, timeout: 10000 },
       );
       const grupos = r.data?.grupos || [];
+      const antes = new Set(grupoOrg.keys());
       grupoOrg.clear();
       for (const g of grupos) {
         grupoOrg.set(g.jid, g.org_id);
         if (!targetGroups.has(g.jid)) {
           targetGroups.set(g.jid, g.nome || 'Grupo');
           logger.info({ jid: g.jid, nome: g.nome }, 'grupo de cliente adicionado ao roteamento');
+        }
+      }
+      // Escritorio que saiu da tabela para de ser escutado na hora. Sem
+      // esta poda, um cliente que cancelou continuaria sendo lido ate
+      // alguem reiniciar o processo — e o bot pode demorar dias assim.
+      for (const jid of antes) {
+        if (!grupoOrg.has(jid) && !WA_GROUP_NAMES.includes(targetGroups.get(jid))) {
+          targetGroups.delete(jid);
+          logger.info({ jid }, 'grupo de cliente saiu do roteamento');
         }
       }
     } catch (err) {
