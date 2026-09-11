@@ -36,6 +36,11 @@ const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 // o bot vai usar pareamento por código de 8 dígitos em vez de QR.
 // Útil quando o WhatsApp bloqueia pareamento por QR (acontece com chip recém-ativado).
 const WA_PHONE_NUMBER = process.env.WA_PHONE_NUMBER?.replace(/\D/g, '') || '';
+// Identidade deste chip no estoque (tabela wa_numero). Quando presente, o
+// bot atende varios escritorios: busca a fila de pedidos e a tabela de
+// roteamento grupo -> organizacao no LIS, em vez de depender so do
+// WA_GROUP_NAMES fixo. Sem ele, o comportamento e o de sempre.
+const WA_NUMERO_ID = process.env.WA_NUMERO_ID || '';
 
 if (!LIS_URL || !LIS_SECRET) {
   console.error('Faltam LIS_CAPTURE_URL ou LIS_CAPTURE_SECRET no .env');
@@ -128,6 +133,15 @@ async function start() {
             logger.info({ jid, name: g.subject }, 'grupo alvo localizado');
           }
         }
+        // grupos cadastrados no LIS (um por escritorio cliente) entram
+        // no mesmo cache: o roteamento por nome fixo vira um caso
+        // particular do roteamento por tabela.
+        for (const [jid, org] of grupoOrg) {
+          if (groups[jid] && !targetGroups.has(jid)) {
+            targetGroups.set(jid, groups[jid].subject);
+            logger.info({ jid, org, name: groups[jid].subject }, 'grupo de cliente localizado');
+          }
+        }
         const naoEncontrados = WA_GROUP_NAMES.filter(
           n => !Array.from(targetGroups.values()).includes(n),
         );
@@ -215,6 +229,145 @@ async function start() {
 
   // Pollster da fila de mensagens outbound (sprint, etc) a cada 30s
   iniciarOutboundPoller(sock);
+
+  // Fila de pedidos (entrar em grupo de cliente) e tabela de roteamento
+  if (WA_NUMERO_ID) {
+    iniciarPedidoPoller(sock);
+    iniciarRoteamento(sock);
+  }
+}
+
+// ============================================================
+//  MULTI-ESCRITORIO
+//  Duas coisas novas, ambas puxadas pelo bot (o VPS nao abre porta):
+//   1. a fila de pedidos — hoje so "entra neste grupo por este link";
+//   2. a tabela de roteamento grupo -> organizacao, que substitui a
+//      lista fixa de nomes quando o bot atende mais de um escritorio.
+// ============================================================
+
+/** jid do grupo -> id da organizacao dona dele */
+const grupoOrg = new Map();
+
+async function iniciarRoteamento(sock) {
+  const buscar = async () => {
+    try {
+      const r = await axios.put(
+        `${LIS_BASE}/api/whatsapp/pedidos?numero_id=${encodeURIComponent(WA_NUMERO_ID)}`,
+        {},
+        { headers: { Authorization: `Bearer ${LIS_SECRET}` }, timeout: 10000 },
+      );
+      const grupos = r.data?.grupos || [];
+      grupoOrg.clear();
+      for (const g of grupos) {
+        grupoOrg.set(g.jid, g.org_id);
+        if (!targetGroups.has(g.jid)) {
+          targetGroups.set(g.jid, g.nome || 'Grupo');
+          logger.info({ jid: g.jid, nome: g.nome }, 'grupo de cliente adicionado ao roteamento');
+        }
+      }
+    } catch (err) {
+      logger.warn({ err: err?.message }, 'roteamento: falha ao buscar grupos');
+    }
+  };
+  await buscar();
+  setInterval(buscar, 120_000);
+}
+
+function iniciarPedidoPoller(sock) {
+  const rodar = async () => {
+    let pedidos = [];
+    try {
+      const r = await axios.get(
+        `${LIS_BASE}/api/whatsapp/pedidos?numero_id=${encodeURIComponent(WA_NUMERO_ID)}`,
+        { headers: { Authorization: `Bearer ${LIS_SECRET}` }, timeout: 10000 },
+      );
+      pedidos = r.data?.pedidos || [];
+    } catch (err) {
+      logger.warn({ err: err?.message }, 'fila de pedidos: falha ao buscar');
+      return;
+    }
+
+    for (const p of pedidos) {
+      try {
+        const resultado = await executarPedido(sock, p);
+        await responderPedido(p.id, true, resultado, null);
+      } catch (err) {
+        logger.error({ pedido: p.id, err: err?.message }, 'pedido falhou');
+        await responderPedido(p.id, false, null, String(err?.message || err));
+      }
+    }
+  };
+  setTimeout(rodar, 8000);
+  setInterval(rodar, 3000);
+}
+
+async function executarPedido(sock, p) {
+  if (p.tipo === 'entrar_grupo') {
+    const codigo = p.payload?.codigo;
+    if (!codigo) throw new Error('pedido sem codigo de convite');
+
+    // groupAcceptInvite devolve o jid do grupo. Se ja estivermos dentro,
+    // o WhatsApp responde com erro de conflito — tratado como sucesso,
+    // porque o efeito desejado (estar no grupo) ja vale.
+    let jid;
+    try {
+      jid = await sock.groupAcceptInvite(codigo);
+    } catch (err) {
+      const info = await sock.groupGetInviteInfo(codigo).catch(() => null);
+      if (!info?.id) throw err;
+      jid = info.id;
+    }
+
+    const meta = await sock.groupMetadata(jid);
+    const eu = (sock.user?.id || '').split(':')[0] + '@s.whatsapp.net';
+    const participantes = (meta.participants || [])
+      .filter(x => x.id !== eu)
+      .map(x => ({
+        jid: x.id,
+        fim: (x.id.split('@')[0] || '').slice(-4),
+        admin: x.admin === 'admin' || x.admin === 'superadmin',
+      }));
+
+    grupoOrg.set(jid, p.org_id);
+    targetGroups.set(jid, meta.subject);
+    logger.info({ jid, nome: meta.subject, gente: participantes.length }, 'entrei no grupo do cliente');
+
+    await sock.sendMessage(jid, {
+      text: 'Oi! Sou a Luana, assistente do LIS. A partir de agora eu leio o que passa aqui e transformo em tarefa no painel de voces. Para eu registrar alguma coisa, escreva assim:\n\n*CLIENTE. o que precisa ser feito*\n\nQuando eu registrar, marco a mensagem com \u2611\ufe0f.',
+    }).catch(() => {});
+
+    return { jid, nome: meta.subject, participantes };
+  }
+
+  if (p.tipo === 'sair_grupo') {
+    const jid = p.payload?.jid;
+    if (!jid) throw new Error('pedido sem jid');
+    await sock.groupLeave(jid);
+    grupoOrg.delete(jid);
+    targetGroups.delete(jid);
+    return { jid, saiu: true };
+  }
+
+  if (p.tipo === 'recado') {
+    const { jid, texto } = p.payload || {};
+    if (!jid || !texto) throw new Error('pedido sem jid ou texto');
+    await sock.sendMessage(jid, { text: texto });
+    return { enviado: true };
+  }
+
+  throw new Error('tipo de pedido desconhecido: ' + p.tipo);
+}
+
+async function responderPedido(id, ok, resultado, erro) {
+  try {
+    await axios.post(
+      `${LIS_BASE}/api/whatsapp/pedidos`,
+      { id, ok, resultado, erro },
+      { headers: { Authorization: `Bearer ${LIS_SECRET}` }, timeout: 10000 },
+    );
+  } catch (err) {
+    logger.error({ id, err: err?.message }, 'nao consegui devolver o resultado do pedido');
+  }
 }
 
 function iniciarOutboundPoller(sock) {
@@ -369,6 +522,10 @@ async function handleMessage(sock, msg) {
     wa_message_id: msg.key.id,
     wa_group_jid: groupJid,
     wa_group_name: groupName, // <-- modo no LIS: "EBADV. Captura" ou "EBadv. Agogê"
+    // De quem e esta mensagem. Vazio = grupo da casa (a EB), que e o
+    // caso de todos os grupos historicos. Preenchido = escritorio
+    // cliente, e o LIS grava a tarefa na organizacao dele.
+    org_id: grupoOrg.get(groupJid) || undefined,
     wa_sender_jid: msg.key.participant || msg.participant || msg.key.remoteJid,
     // Baileys adicionou senderPn/participantPn pra expor o telefone real
     // mesmo quando o JID público é @lid (anônimo do WhatsApp Business).
