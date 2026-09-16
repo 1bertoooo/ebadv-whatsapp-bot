@@ -164,7 +164,21 @@ async function start() {
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
       const shouldReconnect = code !== DisconnectReason.loggedOut;
       logger.warn({ code, shouldReconnect }, 'conexão fechou');
-      if (shouldReconnect) setTimeout(start, 3000);
+      if (shouldReconnect) {
+        // NAO chamar start() de novo aqui. Reconectar dentro do mesmo
+        // processo empilha sockets: o novo passa a receber mensagem e o
+        // antigo continua registrado, e sobra um socket meio vivo, que
+        // le mas nao consegue enviar nem entrar em grupo ("Connection
+        // Closed"). Em 16/09/2026 o log tinha 199 quedas para 192
+        // reconexoes e 514 "Connection Closed", e um cliente empacou no
+        // cadastro por causa disso.
+        //
+        // Sair e deixar o systemd subir de novo devolve um processo com
+        // um socket so. A unidade tem Restart=on-failure, RestartSec=10
+        // e teto de 5 partidas em 300s, que e a protecao contra tempestade.
+        logger.warn('saindo para o systemd subir um processo limpo');
+        setTimeout(() => process.exit(1), 500);
+      }
       else {
         stats.conexao = 'logged_out';
         logger.error('logged out - apague auth_state e leia QR de novo');
@@ -360,25 +374,45 @@ async function executarPedido(sock, p) {
         .filter(Boolean)
         .map(x => x.split(':')[0].split('@')[0]),
     );
-    const participantes = (meta.participants || [])
+    const brutos = (meta.participants || [])
       .filter(x => !meusIds.has((x.id || '').split('@')[0]) && !meusIds.has((x.jid || '').split('@')[0]))
       .map(x => {
-        // preferimos o numero de verdade: e por ele que a Luana reconhece
-        // quem escreveu, e o @lid nao serve para isso.
+        // preferimos o numero de verdade: e por ele que a assistente
+        // reconhece quem escreveu, e o @lid nao serve para isso.
         const fone = (x.phoneNumber || x.jid || x.id || '').split('@')[0];
         return {
           jid: fone,
           fim: fone.slice(-4),
           admin: x.admin === 'admin' || x.admin === 'superadmin',
+          wid: x.id || x.jid,
         };
       });
+
+    // A tela de cadastro mostrava so os quatro ultimos digitos, o que nao
+    // ajuda ninguem a se reconhecer numa lista. Vai o numero inteiro e a
+    // foto de perfil.
+    //
+    // O NOME o WhatsApp nao entrega, e isso nao tem conserto do nosso
+    // lado: o nome que voce ve no seu celular esta na SUA agenda e nunca
+    // sai dela. O que existe e o apelido publico, e ele so chega quando a
+    // pessoa escreve alguma mensagem. Por isso a tela nasce com o nome em
+    // branco para preencher.
+    const participantes = await Promise.all(brutos.map(async (b) => {
+      let foto = null;
+      try {
+        foto = await sock.profilePictureUrl(b.wid, 'preview');
+      } catch {
+        // sem foto, ou escondida nas configuracoes de privacidade dela
+      }
+      return { jid: b.jid, fim: b.fim, admin: b.admin, fone: b.jid, foto };
+    }));
 
     grupoOrg.set(jid, p.org_id);
     targetGroups.set(jid, meta.subject);
     logger.info({ jid, nome: meta.subject, gente: participantes.length }, 'entrei no grupo do cliente');
 
     await sock.sendMessage(jid, {
-      text: 'Oi! Sou a Luana, assistente do LIS. A partir de agora eu leio o que passa aqui e transformo em tarefa no painel de voces. Para eu registrar alguma coisa, escreva assim:\n\n*CLIENTE. o que precisa ser feito*\n\nQuando eu registrar, marco a mensagem com \u2611\ufe0f.',
+      text: 'Oi! Sou a Clio, a assistente do stabi.li. A partir de agora eu leio o que passa aqui e transformo em tarefa no painel de voces. Para eu registrar alguma coisa, escreva assim:\n\n*CLIENTE. o que precisa ser feito*\n\nQuando eu registrar, marco a mensagem com \u2611\ufe0f.',
     }).catch(() => {});
 
     return { jid, nome: meta.subject, participantes };
