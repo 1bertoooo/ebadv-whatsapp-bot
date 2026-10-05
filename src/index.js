@@ -182,27 +182,14 @@ async function start() {
       else {
         stats.conexao = 'logged_out';
         logger.error('logged out - apague auth_state e leia QR de novo');
-        // Avisa o LIS na hora. Sem isto o bot morre calado e so se
-        // descobre horas depois, pelas capturas que nao chegaram.
-        // (Estava so no VPS desde 08/2026; trazido para o repo em 11/09.)
-        try {
-          const base = (process.env.LIS_CAPTURE_URL || '').replace(/\/capture$/, '');
-          if (base) {
-            fetch(base + '/bot-down', {
-              method: 'POST',
-              headers: {
-                'Authorization': 'Bearer ' + (process.env.LIS_CAPTURE_SECRET || ''),
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                motivo: 'logged_out',
-                codigo: code,
-                uptime_iniciado_em: stats.uptimeIniciadoEm,
-              }),
-            }).catch(e => logger.warn({ err: e && e.message }, 'bot-down alert falhou'));
-          }
-        } catch (e) { logger.warn({ err: e.message }, 'bot-down erro'); }
-        process.exit(1);
+        // Avisa o LIS e SO DEPOIS sai. Antes o fetch saia sem await e o
+        // process.exit vinha na mesma volta: o aviso morria junto com o
+        // processo e a queda so aparecia no watchdog do dia seguinte.
+        //
+        // Sai com 3, e nao 1: a unidade do systemd tem
+        // RestartPreventExitStatus=3. Deslogado nao volta sozinho (precisa
+        // parear de novo), e subir em loop so gastaria o chip.
+        avisarDeslogado(code).finally(() => process.exit(3));
       }
     }
   });
@@ -508,6 +495,33 @@ function iniciarOutboundPoller(sock) {
   setInterval(verificar, 30_000);
 }
 
+// Aviso de "deslogado" para o LIS, com prazo: no maximo 8 s esperando.
+async function avisarDeslogado(code) {
+  const base = (process.env.LIS_CAPTURE_URL || '').replace(/\/capture$/, '');
+  if (!base) return;
+  const ctrl = new AbortController();
+  const prazo = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    await fetch(base + '/bot-down', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + (process.env.LIS_CAPTURE_SECRET || ''),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        motivo: 'logged_out',
+        codigo: code,
+        uptime_iniciado_em: stats.uptimeIniciadoEm,
+      }),
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    logger.warn({ err: e && e.message }, 'bot-down alert falhou');
+  } finally {
+    clearTimeout(prazo);
+  }
+}
+
 const LIS_BASE = (LIS_URL || '').replace(/\/api\/whatsapp\/.*$/, '');
 
 async function notificarLIS(endpoint, payload) {
@@ -525,18 +539,26 @@ async function notificarLIS(endpoint, payload) {
 }
 
 function iniciarHeartbeat() {
+  // Se o processo fica 15 minutos sem conseguir falar com o LIS, sai para o
+  // systemd subir um processo limpo. Em 04/10/2026 o bot parou de dar sinal
+  // e ficou quase dois dias fora sem ninguem perceber.
+  let ultimoOk = Date.now();
   const enviar = async () => {
-    try {
-      await notificarLIS('heartbeat', {
-        conexao: stats.conexao,
-        baileys_version: 'baileys',
-        uptime_iniciado_em: stats.uptimeIniciadoEm,
-        ultima_msg_recebida_at: stats.ultimaMsgRecebidaAt,
-        ultima_msg_enviada_at: stats.ultimaMsgEnviadaAt,
-        msgs_processadas_hoje: stats.msgsHoje,
-        jids_grupos: Object.fromEntries(targetGroups),
-      });
-    } catch {}
+    const r = await notificarLIS('heartbeat', {
+      conexao: stats.conexao,
+      baileys_version: 'baileys',
+      uptime_iniciado_em: stats.uptimeIniciadoEm,
+      ultima_msg_recebida_at: stats.ultimaMsgRecebidaAt,
+      ultima_msg_enviada_at: stats.ultimaMsgEnviadaAt,
+      msgs_processadas_hoje: stats.msgsHoje,
+      jids_grupos: Object.fromEntries(targetGroups),
+    }).catch(() => null);
+    if (r !== null) {
+      ultimoOk = Date.now();
+    } else if (Date.now() - ultimoOk > 15 * 60_000) {
+      logger.error('15 minutos sem falar com o LIS: saindo para o systemd subir um processo limpo');
+      process.exit(1);
+    }
   };
   // primeiro envio imediato + cada 60s
   setTimeout(enviar, 5000);
