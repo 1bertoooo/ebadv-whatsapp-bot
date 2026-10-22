@@ -49,11 +49,11 @@ ATUAL=$(sha256sum "$APP/src/index.js" | cut -d' ' -f1)
 if [ "$ATUAL" = "$SHA_NOVO" ]; then
   echo "já estava no código novo"
 elif echo " $SHAS_ANTERIORES " | grep -q " $ATUAL "; then
-  if curl -fsSL "https://raw.githubusercontent.com/1bertoooo/ebadv-whatsapp-bot/$COMMIT/src/index.js" -o /tmp/index.js.voz \
-     && [ "$(sha256sum /tmp/index.js.voz | cut -d' ' -f1)" = "$SHA_NOVO" ] \
-     && node --check /tmp/index.js.voz; then
+  if curl -fsSL "https://raw.githubusercontent.com/1bertoooo/ebadv-whatsapp-bot/$COMMIT/src/index.js" -o /tmp/luana-index-voz.mjs \
+     && [ "$(sha256sum /tmp/luana-index-voz.mjs | cut -d' ' -f1)" = "$SHA_NOVO" ] \
+     && node --check /tmp/luana-index-voz.mjs; then
     cp "$APP/src/index.js" "$APP/src/index.js.antes-$(date +%Y%m%d%H%M)"
-    cp /tmp/index.js.voz "$APP/src/index.js"
+    cp /tmp/luana-index-voz.mjs "$APP/src/index.js"
     echo "código novo instalado (o de antes ficou ao lado, com a data no nome)"
   else
     echo "o download não conferiu: ficou o código de antes, nada mudou"
