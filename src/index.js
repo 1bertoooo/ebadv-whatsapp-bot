@@ -21,6 +21,7 @@ import axios from 'axios';
 import qrcode from 'qrcode-terminal';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 
 const LIS_URL = process.env.LIS_CAPTURE_URL;
 const LIS_SECRET = process.env.LIS_CAPTURE_SECRET;
@@ -629,6 +630,7 @@ async function handleMessage(sock, msg) {
     m.extendedTextMessage?.contextInfo ||
     m.imageMessage?.contextInfo ||
     m.documentMessage?.contextInfo ||
+    m.audioMessage?.contextInfo ||
     null;
   const quotedId = ctxInfo?.stanzaId || null;
 
@@ -658,6 +660,8 @@ async function handleMessage(sock, msg) {
     file: file || undefined,
     reaction: reaction || undefined,
     sticker_b64: typeof stickerB64 !== 'undefined' ? stickerB64 : undefined,
+    // o LIS so responde em audio para bot que sabe mandar nota de voz
+    capacidades: ['nota_de_voz'],
   };
 
   logger.info(
@@ -674,7 +678,9 @@ async function handleMessage(sock, msg) {
   try {
     res = await axios.post(LIS_URL, payload, {
       headers: { Authorization: `Bearer ${LIS_SECRET}` },
-      timeout: 60000,
+      // audio da Luana: transcrever, pensar, usar ferramenta e falar pode
+      // passar de um minuto
+      timeout: 150000,
       maxBodyLength: 100 * 1024 * 1024,
       maxContentLength: 100 * 1024 * 1024,
     });
@@ -683,11 +689,38 @@ async function handleMessage(sock, msg) {
     return;
   }
 
-  const { reply_text, reaction_emoji, classification, capture_id, sticker_url } = res.data || {};
+  const { reply_text, reaction_emoji, classification, capture_id, sticker_url, reply_audio_b64 } = res.data || {};
   logger.info(
-    { classification, has_reaction: !!reaction_emoji, has_reply: !!reply_text, has_sticker: !!sticker_url },
+    {
+      classification,
+      has_reaction: !!reaction_emoji,
+      has_reply: !!reply_text,
+      has_sticker: !!sticker_url,
+      has_audio: !!reply_audio_b64,
+    },
     'LIS respondeu',
   );
+
+  // Resposta falada da Luana: nota de voz citando o audio de quem pediu.
+  // O id da nota de voz volta para o LIS (responder a ela continua a
+  // conversa). Se houver texto junto (os links), ele sai depois.
+  let enviadoParaOLis = null;
+  if (reply_audio_b64) {
+    try {
+      const bruto = Buffer.from(reply_audio_b64, 'base64');
+      const nota = await notaDeVoz(bruto);
+      try { await sock.sendPresenceUpdate('recording', groupJid); } catch {}
+      const conteudo = { audio: nota.audio, mimetype: 'audio/ogg; codecs=opus', ptt: true };
+      if (nota.segundos) conteudo.seconds = nota.segundos;
+      const sentAudio = await sock.sendMessage(groupJid, conteudo, { quoted: msg });
+      try { await sock.sendPresenceUpdate('paused', groupJid); } catch {}
+      stats.ultimaMsgEnviadaAt = new Date().toISOString();
+      enviadoParaOLis = sentAudio?.key?.id || null;
+      logger.info({ bytes: nota.audio.length, segundos: nota.segundos, convertido: nota.convertido }, 'nota de voz enviada');
+    } catch (err) {
+      logger.error({ err: err?.message }, 'falha ao enviar nota de voz');
+    }
+  }
 
   // Envia sticker se a Luana decidiu mandar (Agogê)
   if (sticker_url) {
@@ -721,20 +754,60 @@ async function handleMessage(sock, msg) {
     } catch (err) {
       logger.error({ err: err?.message }, 'falha ao enviar reply');
     }
+    if (!enviadoParaOLis && sent?.key?.id) enviadoParaOLis = sent.key.id;
+  }
 
-    // Reporta wa_message_id da própria resposta pro LIS — habilita correção via reply
-    if (sent?.key?.id && capture_id) {
-      try {
-        await axios.patch(
-          LIS_URL,
-          { capture_id, bot_reply_wa_id: sent.key.id },
-          { headers: { Authorization: `Bearer ${LIS_SECRET}` }, timeout: 10000 },
-        );
-      } catch (err) {
-        logger.warn({ err: err?.message }, 'falha reportando bot_reply_wa_id');
-      }
+  // Reporta wa_message_id da própria resposta pro LIS: habilita correção via
+  // reply e, na nota de voz, a conversa continuar quando respondem a ela
+  if (enviadoParaOLis && capture_id) {
+    try {
+      await axios.patch(
+        LIS_URL,
+        { capture_id, bot_reply_wa_id: enviadoParaOLis },
+        { headers: { Authorization: `Bearer ${LIS_SECRET}` }, timeout: 10000 },
+      );
+    } catch (err) {
+      logger.warn({ err: err?.message }, 'falha reportando bot_reply_wa_id');
     }
   }
+}
+
+/**
+ * Deixa o audio da Luana no formato da nota de voz do WhatsApp (ogg/opus,
+ * mono, 48 kHz) e mede a duracao. Usa o ffmpeg se estiver instalado; sem
+ * ele, manda o opus como veio do LIS, que o WhatsApp tambem toca.
+ */
+function notaDeVoz(bruto) {
+  return new Promise((resolve) => {
+    let ff;
+    try {
+      ff = spawn('ffmpeg', ['-hide_banner', '-i', 'pipe:0', '-ac', '1', '-ar', '48000', '-c:a', 'libopus',
+        '-b:a', '32k', '-application', 'voip', '-f', 'ogg', 'pipe:1']);
+    } catch {
+      return resolve({ audio: bruto, segundos: 0, convertido: false });
+    }
+    const partes = [];
+    let erro = '';
+    let pronto = false;
+    const sem = () => { if (!pronto) { pronto = true; resolve({ audio: bruto, segundos: 0, convertido: false }); } };
+    const relogio = setTimeout(() => { try { ff.kill('SIGKILL'); } catch {} sem(); }, 20000);
+    ff.on('error', () => { clearTimeout(relogio); sem(); });
+    ff.stdout.on('data', (d) => partes.push(d));
+    ff.stderr.on('data', (d) => { erro += d.toString(); if (erro.length > 20000) erro = erro.slice(-10000); });
+    ff.on('close', (codigo) => {
+      clearTimeout(relogio);
+      if (pronto) return;
+      const audio = Buffer.concat(partes);
+      if (codigo !== 0 || !audio.length) return sem();
+      const tempos = [...erro.matchAll(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)];
+      const ultimo = tempos[tempos.length - 1];
+      const segundos = ultimo ? Math.round(+ultimo[1] * 3600 + +ultimo[2] * 60 + +ultimo[3]) : 0;
+      pronto = true;
+      resolve({ audio, segundos, convertido: true });
+    });
+    ff.stdin.on('error', () => {});
+    ff.stdin.end(bruto);
+  });
 }
 
 async function downloadAsFile(sock, msg, kind, meta) {
