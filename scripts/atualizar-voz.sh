@@ -8,9 +8,13 @@
 # 1. instala o ffmpeg (deixa o áudio da Luana no formato exato da nota de
 #    voz do WhatsApp e mede a duração; sem ele o bot manda o áudio como vem);
 # 2. instala o código do bot com a nota de voz (commit d0e9e39), só se o
-#    arquivo do VPS for o da versão anterior conhecida e o download conferir
-#    byte a byte; o de antes fica guardado ao lado, com a data no nome;
-# 3. reinicia o bot e diz se conectou.
+#    arquivo do VPS for uma das versões anteriores conhecidas (8eda056, de
+#    16/09, ou 18ec3a0, de 05/10) e o download conferir byte a byte; o de
+#    antes fica guardado ao lado, com a data no nome;
+# 3. faz o systemd nunca desistir de subir o bot (o mesmo ajuste do
+#    ressuscitar.sh: a versão nova sai com código 3 quando o WhatsApp desloga,
+#    e aí não adianta subir de novo, precisa parear);
+# 4. reinicia o bot e diz se conectou.
 #
 # Para voltar atrás: copie o index.js.antes-<data> por cima do index.js e
 # rode `systemctl restart luana-bot`.
@@ -18,7 +22,8 @@ set -u
 APP=/opt/ebadv-whatsapp-bot
 LOG=/var/log/luana-bot.log
 UNIT=luana-bot
-SHA_ANTERIOR=a22185862da5defb6b51eb013568114ff574c155618727fe5fb0139e875dba32
+# versões que podem estar no VPS: 18ec3a0 (05/10) e 8eda056 (16/09)
+SHAS_ANTERIORES="a22185862da5defb6b51eb013568114ff574c155618727fe5fb0139e875dba32 b99588908899d5f09453667bfc4a314cf7868143209acb53f1ad25b3f78755a5"
 SHA_NOVO=253b495b6292eadb680d7f22ace482202bc53d92aab529f4457cbfe37fd642d3
 COMMIT=d0e9e3908502639d5e3bcbdd644f3575ff1f6ddd
 
@@ -43,7 +48,7 @@ echo "=== 2. código do bot com a nota de voz"
 ATUAL=$(sha256sum "$APP/src/index.js" | cut -d' ' -f1)
 if [ "$ATUAL" = "$SHA_NOVO" ]; then
   echo "já estava no código novo"
-elif [ "$ATUAL" = "$SHA_ANTERIOR" ]; then
+elif echo " $SHAS_ANTERIORES " | grep -q " $ATUAL "; then
   if curl -fsSL "https://raw.githubusercontent.com/1bertoooo/ebadv-whatsapp-bot/$COMMIT/src/index.js" -o /tmp/index.js.voz \
      && [ "$(sha256sum /tmp/index.js.voz | cut -d' ' -f1)" = "$SHA_NOVO" ] \
      && node --check /tmp/index.js.voz; then
@@ -60,7 +65,26 @@ else
 fi
 
 echo
-echo "=== 3. reiniciando"
+echo "=== 3. systemd não desiste de subir o bot"
+mkdir -p "/etc/systemd/system/$UNIT.service.d"
+cat > "/etc/systemd/system/$UNIT.service.d/nunca-desiste.conf" <<'CONF'
+# 04/10/2026: uma sequência de quedas bateu no teto de 5 partidas em 300 s e
+# o systemd parou de subir o bot. Agora ele tenta sempre, a cada 20 s.
+# Saída 3 = deslogada pelo WhatsApp: aí não adianta subir de novo, precisa
+# parear (~/Controle/_ops/luana/parear.sh).
+[Unit]
+StartLimitIntervalSec=0
+[Service]
+Restart=always
+RestartSec=20
+RestartPreventExitStatus=3
+CONF
+systemctl daemon-reload
+systemctl reset-failed "$UNIT" 2>/dev/null
+echo "ok"
+
+echo
+echo "=== 4. reiniciando"
 MARCA=$(linhas_do_log)
 systemctl restart "$UNIT"
 ESTADO="sem resposta em 60 s"
