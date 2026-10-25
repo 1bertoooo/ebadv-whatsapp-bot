@@ -1,6 +1,7 @@
 node_modules/
 .env
 auth_state/
+estado/
 logs/
 *.log
 .DS_Store
