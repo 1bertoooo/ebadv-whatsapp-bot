@@ -12,7 +12,7 @@ const MARCA_AVISO = '\u26a0\ufe0f';
 export function apresentacaoPadrao() {
   return (
     'Olá. Sou a Clio, a assistente do stabi.li. A partir de agora eu leio o que passa aqui ' +
-    'e transformo em tarefa no painel de vocês. Para eu registrar alguma coisa, escreva assim:\n\n' +
+    'e transformo em tarefa no stabi.li de vocês. Para eu registrar alguma coisa, escreva assim:\n\n' +
     '*CLIENTE. o que precisa ser feito*\n\n' +
     `Quando eu registrar, marco a mensagem com ${MARCA_CAIXA_MARCADA}.`
   );

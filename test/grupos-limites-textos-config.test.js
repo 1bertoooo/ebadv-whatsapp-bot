@@ -168,6 +168,13 @@ test('SEG-M12-020: a apresentacao padrao nao tem exclamacao, tem acento e nao ci
   assert.ok(t.includes(String.fromCodePoint(0x2611, 0xfe0f)));
 });
 
+test('TXT-TERMOS-007: a apresentacao padrao chama o produto pelo nome (stabi.li), nao de painel', () => {
+  const t = apresentacaoPadrao();
+  assert.ok(t.includes('transformo em tarefa no stabi.li de vocês.'));
+  assert.ok(!/painel/i.test(t));
+  assert.ok(!/[\u2013\u2014]/.test(t));
+});
+
 test('LGPD-002: o aviso de privacidade leva o endereco configurado e nenhum outro', () => {
   const url = 'https://exemplo.test/privacidade';
   const t = apresentacaoComAviso({ urlDaPrivacidade: url });
