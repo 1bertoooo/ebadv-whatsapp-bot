@@ -249,7 +249,7 @@ async function start() {
   // Heartbeat a cada 60s pro LIS saber que tá vivo
   iniciarHeartbeat();
 
-  // Pollster da fila de mensagens outbound (sprint, etc) a cada 30s
+  // Pollster da fila de mensagens outbound (sprint, etc) a cada 1 min
   iniciarOutboundPoller(sock);
 
   // Fila de pedidos (entrar em grupo de cliente) e tabela de roteamento
@@ -302,7 +302,7 @@ async function iniciarRoteamento(sock) {
     }
   };
   await buscar();
-  setInterval(buscar, 120_000);
+  setInterval(buscar, 600_000); // 10 min (economia na Vercel, 03/11/2026)
 }
 
 function iniciarPedidoPoller(sock) {
@@ -330,7 +330,7 @@ function iniciarPedidoPoller(sock) {
     }
   };
   setTimeout(rodar, 8000);
-  setInterval(rodar, 3000);
+  setInterval(rodar, 60_000); // 1 min: pedidos de entrar em grupo são raros (economia na Vercel, 03/11/2026)
 }
 
 async function executarPedido(sock, p) {
@@ -493,7 +493,7 @@ function iniciarOutboundPoller(sock) {
     }
   };
   setTimeout(verificar, 15000);
-  setInterval(verificar, 30_000);
+  setInterval(verificar, 60_000); // 1 min (economia na Vercel, 03/11/2026)
 }
 
 // Aviso de "deslogado" para o LIS, com prazo: no maximo 8 s esperando.
@@ -563,7 +563,7 @@ function iniciarHeartbeat() {
   };
   // primeiro envio imediato + cada 60s
   setTimeout(enviar, 5000);
-  setInterval(enviar, 60_000);
+  setInterval(enviar, 120_000); // 2 min; o vigia do LIS só alarma com 5 min sem sinal (economia na Vercel, 03/11/2026)
 }
 
 async function handleMessage(sock, msg) {
