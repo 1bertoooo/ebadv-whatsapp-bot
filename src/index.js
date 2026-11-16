@@ -13,6 +13,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  fetchLatestWaWebVersion,
   downloadMediaMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
@@ -70,12 +71,31 @@ function statsResetSeNovoDia() {
   }
 }
 
+// A versão do WhatsApp Web que o socket anuncia ao conectar.
+//
+// fetchLatestBaileysVersion() lê um arquivo do repositório do Baileys que fica
+// meses sem atualizar: em 16/11/2026 ele dizia 2.3000.1043857760 (de 26/07),
+// enquanto o web.whatsapp.com já estava na 2.3000.1054767004. O WhatsApp recusa
+// versão velha: em 13/11 a sessão caiu e em 16/11 o pareamento novo foi recusado
+// com 401 antes de sair o código. fetchLatestWaWebVersion() lê a versão do
+// próprio web.whatsapp.com (sw.js); se essa leitura falhar, vale a do Baileys.
+async function versaoDoWhatsAppWeb() {
+  try {
+    const web = await fetchLatestWaWebVersion();
+    if (web?.isLatest && Array.isArray(web.version)) return { version: web.version, origem: 'web.whatsapp.com' };
+  } catch (err) {
+    logger.warn({ err: err?.message }, 'não li a versão do web.whatsapp.com; vale a do Baileys');
+  }
+  const { version } = await fetchLatestBaileysVersion();
+  return { version, origem: 'repositório do Baileys' };
+}
+
 async function start() {
   if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  const { version } = await fetchLatestBaileysVersion();
-  logger.info({ baileysVersion: version }, 'iniciando');
+  const { version, origem } = await versaoDoWhatsAppWeb();
+  logger.info({ baileysVersion: version, origemDaVersao: origem }, 'iniciando');
 
   const sock = makeWASocket({
     version,
