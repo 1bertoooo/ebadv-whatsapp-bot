@@ -90,7 +90,94 @@ async function versaoDoWhatsAppWeb() {
   return { version, origem: 'repositório do Baileys' };
 }
 
-async function start() {
+// ============================================================
+//  RECONECTAR PELO LIS (17/11/2026)
+//  Antes, deslogada, a Luana saía com 3 e só voltava com alguém rodando o
+//  parear.sh pelo Terminal, com a senha do root. Agora, sem sessão, o
+//  processo continua vivo, manda sinal ao LIS como 'aguardando_pareamento'
+//  e espera um pedido de código feito na tela /admin/luana (fila
+//  wa_pedido, tipo 'parear'). Com o pedido, pede o código ao WhatsApp e
+//  devolve ao LIS, que mostra o código para digitar no celular da Luana.
+//  Só vale com WA_PHONE_NUMBER e WA_NUMERO_ID no .env; sem eles, tudo
+//  continua como antes.
+// ============================================================
+const PAREAMENTO_PELO_LIS = !!(WA_PHONE_NUMBER && WA_NUMERO_ID);
+
+/**
+ * A sessão gravada serve para entrar? Vale a que o WhatsApp registrou
+ * ('registered') ou a que já tem conta ('account', gravada quando o
+ * pareamento dá certo). Tentativa de pareamento que não terminou deixa
+ * uma sessão pela metade, que o WhatsApp recusa com 401 no reinício: essa
+ * não serve, e vai para o lado.
+ */
+function sessaoUtil() {
+  try {
+    const creds = JSON.parse(fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf8'));
+    return creds?.registered === true || !!creds?.account;
+  } catch {
+    return false;
+  }
+}
+
+/** Põe a sessão de agora ao lado, com data, só com leitura do dono. A próxima começa limpa. */
+function guardarSessaoVelha() {
+  if (!fs.existsSync(AUTH_DIR)) return;
+  const carimbo = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const destino = `${path.resolve(AUTH_DIR)}_backup_${carimbo}`;
+  try {
+    fs.renameSync(AUTH_DIR, destino);
+    fs.chmodSync(destino, 0o700);
+    logger.info({ destino }, 'sessão guardada ao lado; a próxima começa limpa');
+  } catch (err) {
+    logger.warn({ err: err?.message }, 'não consegui guardar a sessão velha');
+  }
+}
+
+const esperar = (ms) => new Promise((ok) => setTimeout(ok, ms));
+
+/**
+ * Sem sessão: espera, de 20 em 20 segundos, um pedido de código feito na
+ * tela do LIS. Não abre conexão com o WhatsApp enquanto ninguém pede, para
+ * não gastar o número com tentativas (em 16/11/2026 quatro tentativas em
+ * 20 minutos fizeram o WhatsApp recusar novos pedidos).
+ */
+async function esperarPedidoDeCodigo() {
+  stats.conexao = 'aguardando_pareamento';
+  iniciarHeartbeat();
+  logger.info('sem sessão no WhatsApp: esperando o pedido de código pela tela Luana no WhatsApp, no LIS');
+  for (;;) {
+    try {
+      const r = await axios.get(
+        `${LIS_BASE}/api/whatsapp/pedidos?numero_id=${encodeURIComponent(WA_NUMERO_ID)}&tipo=parear`,
+        { headers: { Authorization: `Bearer ${LIS_SECRET}` }, timeout: 10000 },
+      );
+      const pedidos = r.data?.pedidos || [];
+      if (pedidos.length) {
+        // vem do mais velho para o mais novo; vale o mais novo
+        const escolhido = pedidos[pedidos.length - 1];
+        for (const p of pedidos.slice(0, -1)) {
+          await responderPedido(p.id, false, null, 'pedido repetido: valeu o mais novo');
+        }
+        logger.info({ pedido: escolhido.id }, 'pedido de código recebido do LIS');
+        return escolhido;
+      }
+    } catch (err) {
+      logger.warn({ err: err?.message }, 'pareamento: falha ao buscar pedido no LIS');
+    }
+    await esperar(20_000);
+  }
+}
+
+async function principal() {
+  if (PAREAMENTO_PELO_LIS && !sessaoUtil()) {
+    guardarSessaoVelha();
+    const pedido = await esperarPedidoDeCodigo();
+    return start(pedido);
+  }
+  return start(null);
+}
+
+async function start(pedido) {
   if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -107,6 +194,18 @@ async function start() {
   });
 
   sock.ev.on('creds.update', saveCreds);
+
+  // Pedido de código vindo do LIS: a tela fica sabendo do código e de uma
+  // falha só (a primeira); um código entregue pode virar falha depois, se
+  // vencer ou se a conexão cair antes de ele ser usado.
+  let conectou = false;
+  let codigoEntregue = false;
+  let falhaRespondida = false;
+  const responderFalha = async (motivo) => {
+    if (!pedido || falhaRespondida) return;
+    falhaRespondida = true;
+    await responderPedido(pedido.id, false, null, motivo);
+  };
 
   // Pareamento por código (em vez de QR) quando WA_PHONE_NUMBER está setado
   if (WA_PHONE_NUMBER && !sock.authState.creds.registered) {
@@ -125,8 +224,14 @@ async function start() {
         console.log('  > Conectar com número de telefone');
         console.log('  > digite o número, depois o código acima');
         console.log('========================================\n');
+        if (pedido) {
+          codigoEntregue = true;
+          await responderPedido(pedido.id, true, { codigo: formatted, gerado_em: new Date().toISOString() }, null);
+          logger.info({ pedido: pedido.id }, 'código de pareamento entregue ao LIS');
+        }
       } catch (err) {
         logger.error({ err: err?.message }, 'falha ao gerar pairing code');
+        await responderFalha(`o WhatsApp recusou o pedido de código (${err?.message || err})`);
       }
     }, 3500);
   }
@@ -143,6 +248,7 @@ async function start() {
     }
 
     if (connection === 'open') {
+      conectou = true;
       logger.info('conectado ao WhatsApp');
       stats.conexao = 'open';
       // Tenta achar todos os grupos configurados
@@ -185,6 +291,17 @@ async function start() {
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
       const shouldReconnect = code !== DisconnectReason.loggedOut;
       logger.warn({ code, shouldReconnect }, 'conexão fechou');
+      // Pareamento pedido pelo LIS que não chegou a conectar: a tela precisa
+      // saber. 515 é o "reinicie" que o WhatsApp manda logo depois de o
+      // código dar certo; esse não é falha.
+      if (pedido && !conectou && code !== DisconnectReason.restartRequired) {
+        const motivo = !codigoEntregue
+          ? `o WhatsApp recusou o pedido de código (erro ${code})`
+          : code === 408
+            ? 'o código venceu sem ser usado'
+            : `a conexão caiu antes de o código ser usado (erro ${code})`;
+        responderFalha(motivo).catch(() => {});
+      }
       if (shouldReconnect) {
         // NAO chamar start() de novo aqui. Reconectar dentro do mesmo
         // processo empilha sockets: o novo passa a receber mensagem e o
@@ -198,7 +315,9 @@ async function start() {
         // um socket so. A unidade tem Restart=on-failure, RestartSec=10
         // e teto de 5 partidas em 300s, que e a protecao contra tempestade.
         logger.warn('saindo para o systemd subir um processo limpo');
-        setTimeout(() => process.exit(1), 500);
+        // Depois de um pareamento que deu certo (515) espera um pouco mais,
+        // para a sessão nova terminar de ser gravada antes de sair.
+        setTimeout(() => process.exit(1), code === DisconnectReason.restartRequired ? 3000 : 500);
       }
       else {
         stats.conexao = 'logged_out';
@@ -207,7 +326,19 @@ async function start() {
         // process.exit vinha na mesma volta: o aviso morria junto com o
         // processo e a queda so aparecia no watchdog do dia seguinte.
         //
-        // Sai com 3, e nao 1: a unidade do systemd tem
+        // Com o pareamento pelo LIS (17/11/2026): guarda a sessão recusada e
+        // sai com 1; o systemd sobe um processo que espera, sem conectar, o
+        // código pedido na tela /admin/luana. Se a recusa veio durante um
+        // pareamento, a tela já sabe, e não sai outro e-mail de "caiu".
+        if (PAREAMENTO_PELO_LIS) {
+          const aviso = pedido ? Promise.resolve() : avisarDeslogado(code);
+          aviso.finally(() => {
+            guardarSessaoVelha();
+            process.exit(1);
+          });
+          return;
+        }
+        // Sem ele: sai com 3, e nao 1; a unidade do systemd tem
         // RestartPreventExitStatus=3. Deslogado nao volta sozinho (precisa
         // parear de novo), e subir em loop so gastaria o chip.
         avisarDeslogado(code).finally(() => process.exit(3));
@@ -559,7 +690,11 @@ async function notificarLIS(endpoint, payload) {
   }
 }
 
+let heartbeatLigado = false;
 function iniciarHeartbeat() {
+  // Liga uma vez só: o processo que espera o código já liga, e o start() liga de novo.
+  if (heartbeatLigado) return;
+  heartbeatLigado = true;
   // Se o processo fica 15 minutos sem conseguir falar com o LIS, sai para o
   // systemd subir um processo limpo. Em 04/10/2026 o bot parou de dar sinal
   // e ficou quase dois dias fora sem ninguem perceber.
@@ -846,7 +981,7 @@ async function downloadAsFile(sock, msg, kind, meta) {
   }
 }
 
-start().catch((e) => {
+principal().catch((e) => {
   logger.error({ err: e?.message, stack: e?.stack }, 'fatal');
   process.exit(1);
 });
