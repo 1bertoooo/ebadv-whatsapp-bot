@@ -151,7 +151,13 @@ async function esperarPedidoDeCodigo() {
         `${LIS_BASE}/api/whatsapp/pedidos?numero_id=${encodeURIComponent(WA_NUMERO_ID)}&tipo=parear`,
         { headers: { Authorization: `Bearer ${LIS_SECRET}` }, timeout: 10000 },
       );
-      const pedidos = r.data?.pedidos || [];
+      const recebidos = r.data?.pedidos || [];
+      // Um LIS antigo ignora o tipo=parear e devolve qualquer pedido: o que não
+      // é de código volta como erro, para não ficar parado como "executando".
+      for (const p of recebidos.filter((x) => x.tipo !== 'parear')) {
+        await responderPedido(p.id, false, null, 'a Luana está sem sessão no WhatsApp; peça de novo depois que ela voltar');
+      }
+      const pedidos = recebidos.filter((x) => x.tipo === 'parear');
       if (pedidos.length) {
         // vem do mais velho para o mais novo; vale o mais novo
         const escolhido = pedidos[pedidos.length - 1];
